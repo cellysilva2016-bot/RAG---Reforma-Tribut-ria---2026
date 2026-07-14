@@ -229,7 +229,7 @@ TRECHOS OFICIAIS DO REGULAMENTO (sua única base de resposta):
 
                     # ── PASSO F: GERAÇÃO DA RESPOSTA ──────────────────────
                     resposta_llm = ai_client.models.generate_content(
-                        model="gemini-2.5-flash",
+                        model="gemini-3.5-flash",
                         contents=prompt_final
                     )
 
