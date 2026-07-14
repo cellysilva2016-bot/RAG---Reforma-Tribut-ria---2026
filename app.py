@@ -34,13 +34,6 @@ st.divider()
 
 
 # ── Gerenciamento de credenciais ──────────────────────────────────────────
-# ESTRATÉGIA DUPLA:
-#   1ª opção: lê do st.secrets (arquivo .streamlit/secrets.toml no deploy)
-#   2ª opção: exibe campos na barra lateral (demonstração local)
-#
-# Isso permite que o mesmo arquivo app.py funcione em ambos os contextos
-# sem nenhuma alteração de código.
-
 def obter_credenciais():
     """
     Tenta ler credenciais do st.secrets (produção no Streamlit Cloud).
@@ -48,16 +41,13 @@ def obter_credenciais():
     Retorna (url, key, api_key, fonte) onde fonte é 'secrets' ou 'sidebar'.
     """
     try:
-        # st.secrets lê de .streamlit/secrets.toml (deploy) ou variáveis
-        # de ambiente configuradas no Streamlit Cloud
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
         api = st.secrets["GOOGLE_API_KEY"]
         return url, key, api, "secrets"
     except (KeyError, FileNotFoundError):
-        pass  # Secrets não disponíveis — usa barra lateral
+        pass
 
-    # Fallback: sidebar para demonstração/desenvolvimento local
     with st.sidebar:
         st.header("🔑 Configurações de Acesso")
         st.caption(
@@ -84,7 +74,6 @@ def obter_credenciais():
 
 SUPABASE_URL, SUPABASE_KEY, GOOGLE_API_KEY, fonte = obter_credenciais()
 
-# Interrompe a execução com orientação clara se alguma chave estiver faltando
 if not (SUPABASE_URL and SUPABASE_KEY and GOOGLE_API_KEY):
     if fonte == "sidebar":
         st.warning("👈 Preencha todas as credenciais na barra lateral para iniciar o chat.")
@@ -97,11 +86,6 @@ if not (SUPABASE_URL and SUPABASE_KEY and GOOGLE_API_KEY):
 
 
 # ── Conexões com cache ────────────────────────────────────────────────────
-# @st.cache_resource: inicializa os clientes UMA única vez por sessão de
-# servidor. Sem isso, o Streamlit reconectaria a cada interação do usuário.
-# As credenciais são passadas como parâmetros para invalidar o cache
-# automaticamente caso as chaves mudem.
-
 @st.cache_resource
 def inicializar_clientes(url: str, key: str, api_key: str):
     """Inicializa e retorna os clientes Supabase e Google Gemini."""
@@ -118,24 +102,17 @@ except Exception as e:
 
 
 # ── Histórico do chat ─────────────────────────────────────────────────────
-# st.session_state persiste variáveis entre reruns do Streamlit
-# durante a mesma sessão de navegador do usuário.
-
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Renderiza todas as mensagens anteriores da conversa
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
 
 # ── Fluxo RAG principal ───────────────────────────────────────────────────
-# Ativado quando o usuário digita e envia uma pergunta no campo de chat.
-
 if pergunta := st.chat_input("Ex: Como funciona o Split Payment no IBS?"):
 
-    # Registra e exibe a mensagem do usuário
     st.session_state.messages.append({"role": "user", "content": pergunta})
     with st.chat_message("user"):
         st.markdown(pergunta)
@@ -143,11 +120,7 @@ if pergunta := st.chat_input("Ex: Como funciona o Split Payment no IBS?"):
     with st.chat_message("assistant"):
         with st.spinner("🔍 Buscando artigos relevantes no regulamento..."):
             try:
-
                 # ── PASSO A: EMBEDDING DA PERGUNTA ───────────────────────
-                # Transforma a pergunta em um vetor de 3072 dimensões.
-                # Esse vetor será comparado matematicamente com os vetores
-                # dos artigos armazenados no banco.
                 resposta_emb = ai_client.models.embed_content(
                     model="gemini-embedding-2",
                     contents=pergunta,
@@ -156,15 +129,12 @@ if pergunta := st.chat_input("Ex: Como funciona o Split Payment no IBS?"):
                 vetor_pergunta = resposta_emb.embeddings[0].values
 
                 # ── PASSO B: BUSCA SEMÂNTICA NO SUPABASE ─────────────────
-                # Envia o vetor ao banco via RPC (Remote Procedure Call).
-                # A função 'buscar_artigos_ibs' calcula a distância do
-                # cosseno e retorna os artigos mais próximos.
                 resultado_busca = supabase.rpc(
                     "buscar_artigos_ibs",
                     {
                         "query_embedding": vetor_pergunta,
-                        "match_threshold": 0.3,   # Similaridade mínima de 30%
-                        "match_count":     4       # Top 4 artigos mais relevantes
+                        "match_threshold": 0.3,
+                        "match_count":     4
                     }
                 ).execute()
 
@@ -175,7 +145,7 @@ if pergunta := st.chat_input("Ex: Como funciona o Split Payment no IBS?"):
                     resposta = (
                         "Não encontrei artigos no regulamento com relevância "
                         "suficiente para responder a esta pergunta. "
-                        "Tente reformular ou pergunte sobre outro aspecto do IBS/CBS."
+                        "Tente reformular ou pergunte sobre outro aspect do IBS/CBS."
                     )
                     st.markdown(resposta)
                     st.session_state.messages.append(
@@ -184,8 +154,6 @@ if pergunta := st.chat_input("Ex: Como funciona o Split Payment no IBS?"):
 
                 else:
                     # ── PASSO D: MONTAGEM DO CONTEXTO ────────────────────
-                    # Reúne o conteúdo dos artigos recuperados em um bloco
-                    # de texto que será entregue à IA como base da resposta.
                     contexto_juridico = ""
                     referencias       = []
 
@@ -195,60 +163,39 @@ if pergunta := st.chat_input("Ex: Como funciona o Split Payment no IBS?"):
                         capitulo = art["metadata"].get("capitulo", "")
                         sim      = art.get("similaridade", 0)
 
-                        # Monta o cabeçalho com a localização hierárquica
                         partes   = [p for p in [livro, titulo, capitulo] if p]
                         cabecalho = " | ".join(partes) if partes else "Sem hierarquia"
+                        
+                        contexto_juridico += f"\n\n[{cabecalho}]\n{art['content']}"
+                        referencias.append(f"• {cabecalho} (Similaridade: {sim:.2%})")
 
-                        contexto_juridico += (
-                            f"\n[{art['id']} — {cabecalho}] "
-                            f"(similaridade: {sim:.0%})\n"
-                            f"{art['page_content']}\n"
-                        )
-                        referencias.append(art["id"].replace("_", " "))
-
-                    # ── PASSO E: CONSTRUÇÃO DO PROMPT ─────────────────────
-                    # O prompt instrui o modelo Gemini a agir como especialista
-                    # tributário e a basear sua resposta EXCLUSIVAMENTE nos
-                    # artigos fornecidos no contexto — prevenindo alucinações.
-                    prompt_final = f"""Você é um contador e advogado especialista \
-na Reforma Tributária brasileira (IBS/CBS), com profundo conhecimento da \
-Resolução CGIBS Nº 6, de 30 de abril de 2026.
-
-Responda à pergunta do usuário seguindo OBRIGATORIAMENTE estas regras:
-1. Baseie-se EXCLUSIVAMENTE nos trechos do regulamento fornecidos abaixo.
-2. Cite explicitamente o número do Artigo de onde retirou cada informação.
-3. Se a resposta não estiver nos trechos, diga: "O regulamento não especifica isso nos artigos consultados."
-4. Não use conhecimento externo ao contexto fornecido. Não invente informações.
-5. Use linguagem clara, didática e tecnicamente precisa.
-
-PERGUNTA DO USUÁRIO:
-{pergunta}
-
-TRECHOS OFICIAIS DO REGULAMENTO (sua única base de resposta):
-{contexto_juridico}"""
-
-                    # ── PASSO F: GERAÇÃO DA RESPOSTA ──────────────────────
-                    resposta_llm = ai_client.models.generate_content(
-                        model="gemini-3.5-flash",
-                        contents=prompt_final
+                    # ── PASSO E: ENVIO AO GEMINI 3.5 FLASH ───────────────
+                    system_instruction = (
+                        "Você é um advogado tributarista especialista na Reforma Tributária. "
+                        "Responda à pergunta do usuário utilizando unicamente o contexto fornecido. "
+                        "Seja preciso e cite os trechos relevantes."
                     )
-
-                    # Monta a resposta final com rodapé de referências
-                    rodape = (
-                        f"\n\n---\n"
-                        f"📚 *Artigos consultados: {', '.join(referencias)}*"
+                    
+                    prompt = f"Contexto:\n{contexto_juridico}\n\nPergunta: {pergunta}"
+                    
+                    # Chamada corrigida para a versão estável atualizada
+                    resposta_ai = ai_client.models.generate_content(
+                        model='gemini-3.5-flash',
+                        contents=prompt,
+                        config={"system_instruction": system_instruction}
                     )
-                    resposta_completa = resposta_llm.text + rodape
-
-                    # Exibe e registra no histórico da conversa
-                    st.markdown(resposta_completa)
+                    
+                    resposta_final = resposta_ai.text
+                    
+                    # Exibe o resultado e as referências
+                    st.markdown(resposta_final)
+                    with st.expander("📚 Fontes consultadas no banco de dados"):
+                        for ref in referencias:
+                            st.write(ref)
+                            
                     st.session_state.messages.append(
-                        {"role": "assistant", "content": resposta_completa}
+                        {"role": "assistant", "content": resposta_final}
                     )
-
+                    
             except Exception as e:
-                st.error(f"❌ Erro no processamento: {str(e)}")
-                st.info(
-                    "Verifique se as credenciais estão corretas e se o banco "
-                    "foi configurado conforme o Notebook 2."
-                )
+                st.error(f"Erro ao processar a requisição: {e}")
